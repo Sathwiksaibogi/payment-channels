@@ -1,4 +1,5 @@
 use borsh::{BorshDeserialize, BorshSerialize};
+use sha2::{Digest, Sha256};
 
 pub const V1_PAYLOAD_LEN: usize = 50;
 pub const V1_MAGIC: [u8; 2] = [0x56, 0x01];
@@ -62,9 +63,50 @@ pub struct SettlementTransition {
     pub new_settled: u64,
 }
 
-/// Public output of a successfully validated settlement batch.
+/// Domain separator for the canonical settlement-transition commitment.
+pub const SETTLEMENT_BATCH_COMMITMENT_DOMAIN: &[u8] = b"zkchannel:settlement-batch:v1";
+
+/// Compute the canonical, order-sensitive commitment to a validated
+/// settlement batch.
+///
+/// Encoding:
+/// domain
+/// || settlement_count:u32 LE
+/// || now_unix:i64 LE
+/// || each(
+///      channel_address:[u8;32]
+///      || previous_settled:u64 LE
+///      || new_settled:u64 LE
+///    )
+pub fn settlement_batch_commitment(
+    now_unix: i64,
+    transitions: &[SettlementTransition],
+) -> [u8; 32] {
+    let settlement_count = u32::try_from(transitions.len()).expect("settlement count exceeds u32");
+
+    let mut hasher = Sha256::new();
+
+    hasher.update(SETTLEMENT_BATCH_COMMITMENT_DOMAIN);
+    hasher.update(settlement_count.to_le_bytes());
+    hasher.update(now_unix.to_le_bytes());
+
+    for transition in transitions {
+        hasher.update(transition.channel_address);
+        hasher.update(transition.previous_settled.to_le_bytes());
+        hasher.update(transition.new_settled.to_le_bytes());
+    }
+
+    let digest = hasher.finalize();
+
+    let mut commitment = [0u8; 32];
+    commitment.copy_from_slice(&digest);
+    commitment
+}
+
+/// Fixed-size public output of a successfully validated settlement batch.
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct SettlementBatchJournal {
     pub now_unix: i64,
-    pub transitions: Vec<SettlementTransition>,
+    pub settlement_count: u32,
+    pub transitions_commitment: [u8; 32],
 }

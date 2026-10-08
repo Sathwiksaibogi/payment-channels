@@ -6,8 +6,8 @@ use serde::Deserialize;
 
 use zkchannel_zk_methods::{ZKCHANNEL_VOUCHER_GUEST_ELF, ZKCHANNEL_VOUCHER_GUEST_ID};
 use zkchannel_zk_shared::{
-    ChannelStateInput, SettlementBatchInput, SettlementBatchJournal, SettlementInput,
-    SettlementTransition, CHANNEL_STATUS_OPEN, V1_PAYLOAD_LEN,
+    settlement_batch_commitment, ChannelStateInput, SettlementBatchInput, SettlementBatchJournal,
+    SettlementInput, SettlementTransition, CHANNEL_STATUS_OPEN, V1_PAYLOAD_LEN,
 };
 
 const TEST_DEPOSIT: u64 = 1_000_000;
@@ -113,7 +113,7 @@ fn payload_cumulative_amount(payload: &[u8]) -> u64 {
 }
 
 fn expected_journal(input: &SettlementBatchInput) -> SettlementBatchJournal {
-    let transitions = input
+    let transitions: Vec<SettlementTransition> = input
         .settlements
         .iter()
         .map(|settlement| SettlementTransition {
@@ -123,9 +123,14 @@ fn expected_journal(input: &SettlementBatchInput) -> SettlementBatchJournal {
         })
         .collect();
 
+    let settlement_count = u32::try_from(transitions.len()).expect("settlement count exceeds u32");
+
+    let transitions_commitment = settlement_batch_commitment(input.now_unix, &transitions);
+
     SettlementBatchJournal {
         now_unix: input.now_unix,
-        transitions,
+        settlement_count,
+        transitions_commitment,
     }
 }
 
@@ -158,20 +163,17 @@ fn main() {
 
     assert_eq!(journal, expected_journal(&input));
 
-    let transition = &journal.transitions[0];
-
     println!("Receipt verified against ZKChannel guest image ID.");
 
-    println!("Settlement transition verified:");
+    println!("Settlement batch verified:");
+    println!("  now_unix               = {}", journal.now_unix);
+    println!("  settlement_count       = {}", journal.settlement_count);
     println!(
-        "  channel_address  = {}",
-        hex::encode(transition.channel_address)
+        "  transitions_commitment = {}",
+        hex::encode(journal.transitions_commitment)
     );
-    println!("  previous_settled = {}", transition.previous_settled);
-    println!("  new_settled      = {}", transition.new_settled);
-    println!("  now_unix         = {}", journal.now_unix);
 
-    println!("ZKChannel single-channel settlement validation succeeded.");
+    println!("ZKChannel settlement batch validation succeeded.");
 }
 
 #[cfg(test)]
@@ -528,15 +530,37 @@ mod tests {
 
         assert_eq!(journal, expected_journal(&input));
 
-        assert_eq!(journal.transitions.len(), 3);
+        assert_eq!(journal.settlement_count, 3);
 
-        assert_eq!(journal.transitions[0].previous_settled, 40);
-        assert_eq!(journal.transitions[0].new_settled, 100);
+        assert_eq!(
+            hex::encode(journal.transitions_commitment),
+            "d485997ce91ea64cebe80942afe56f854adc054f9edf20e660faf03bc3b02424"
+        );
+    }
 
-        assert_eq!(journal.transitions[1].previous_settled, 75);
-        assert_eq!(journal.transitions[1].new_settled, 200);
+    #[test]
+    fn settlement_batch_journal_is_fixed_size() {
+        let fixture = load_fixture();
 
-        assert_eq!(journal.transitions[2].previous_settled, 125);
-        assert_eq!(journal.transitions[2].new_settled, 300);
+        let one = expected_journal(&fixture_input(&fixture));
+
+        let three_input = SettlementBatchInput {
+            now_unix: TEST_NOW_UNIX,
+            settlements: vec![
+                signed_settlement([10u8; 32], [10u8; 32], 100, 0, 1_000, 40),
+                signed_settlement([11u8; 32], [11u8; 32], 200, 0, 1_000, 75),
+                signed_settlement([12u8; 32], [12u8; 32], 300, 0, 1_000, 125),
+            ],
+        };
+
+        let three = expected_journal(&three_input);
+
+        let one_bytes = to_vec(&one).expect("failed to encode one-item journal");
+
+        let three_bytes = to_vec(&three).expect("failed to encode three-item journal");
+
+        assert_eq!(one_bytes.len(), 44);
+        assert_eq!(three_bytes.len(), 44);
+        assert_eq!(one_bytes.len(), three_bytes.len());
     }
 }

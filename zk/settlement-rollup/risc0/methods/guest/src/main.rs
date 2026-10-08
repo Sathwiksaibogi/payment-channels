@@ -6,7 +6,7 @@ use risc0_zkvm::guest::env;
 
 use zkchannel_zk_shared::{
     SettlementBatchInput, SettlementBatchJournal, SettlementInput,
-    SettlementTransition, CHANNEL_STATUS_OPEN, V1_MAGIC, V1_PAYLOAD_LEN,
+    SettlementTransition, CHANNEL_STATUS_OPEN, V1_MAGIC, V1_PAYLOAD_LEN,settlement_batch_commitment,
 };
 
 risc0_zkvm::guest::entry!(main);
@@ -134,9 +134,20 @@ fn main() {
         );
     }
 
+    let settlement_count =
+        u32::try_from(transitions.len())
+            .expect("settlement count exceeds u32");
+
+    let transitions_commitment =
+        settlement_batch_commitment(
+            input.now_unix,
+            &transitions,
+        );
+
     let journal = SettlementBatchJournal {
         now_unix: input.now_unix,
-        transitions,
+        settlement_count,
+        transitions_commitment,
     };
 
     journal
