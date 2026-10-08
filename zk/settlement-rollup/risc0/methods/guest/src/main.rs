@@ -5,83 +5,121 @@ use ed25519_dalek::{Signature, VerifyingKey};
 use risc0_zkvm::guest::env;
 
 use zkchannel_zk_shared::{
-    V1VoucherInput,
-    V1VoucherJournal,
-    V1_MAGIC,
-    V1_PAYLOAD_LEN,
+    SettlementBatchInput, SettlementBatchJournal, SettlementInput,
+    SettlementTransition, CHANNEL_STATUS_OPEN, V1_MAGIC, V1_PAYLOAD_LEN,
 };
 
 risc0_zkvm::guest::entry!(main);
 
-fn main() {
-    let input =
-        V1VoucherInput::deserialize_reader(&mut env::stdin())
-            .expect("invalid V1 voucher input encoding");
+fn validate_settlement(
+    settlement: &SettlementInput,
+    now_unix: i64,
+) -> SettlementTransition {
+    let channel = &settlement.channel;
+    let payload = &settlement.payload;
 
-    // ------------------------------------------------------------
-    // 1. Enforce the exact existing V1 payload shape.
-    // ------------------------------------------------------------
-
+    // Ordinary `settle` is valid only while the channel is OPEN.
     assert_eq!(
-        input.payload.len(),
+        channel.status,
+        CHANNEL_STATUS_OPEN,
+        "channel must be OPEN"
+    );
+
+    // Preserve the exact existing V1 signed-message contract.
+    assert_eq!(
+        payload.len(),
         V1_PAYLOAD_LEN,
         "V1 voucher payload must be exactly 50 bytes"
     );
 
     assert_eq!(
-        &input.payload[0..2],
+        &payload[0..2],
         &V1_MAGIC,
         "invalid V1 voucher magic"
     );
 
-    // ------------------------------------------------------------
-    // 2. Verify the Ed25519 authorization.
+    // In the existing program the Ed25519 precompile has already verified
+    // the signed message before verify_voucher() evaluates channel semantics.
     //
-    // The signature must verify over the exact canonical 50-byte
-    // V1 payload under the supplied authorized signer.
-    // ------------------------------------------------------------
-
+    // Here the zkVM performs that authorization directly using the signer
+    // committed in the supplied channel state.
     let verifying_key =
-        VerifyingKey::from_bytes(&input.authorized_signer)
-            .expect("invalid Ed25519 authorized signer");
+        VerifyingKey::from_bytes(&channel.authorized_signer)
+            .expect("invalid channel authorized_signer");
 
-    let signature =
-        Signature::from_bytes(&input.signature);
+    let signature = Signature::from_bytes(&settlement.signature);
 
     verifying_key
-        .verify_strict(&input.payload, &signature)
+        .verify_strict(payload, &signature)
         .expect("invalid V1 voucher Ed25519 signature");
 
-    // ------------------------------------------------------------
-    // 3. Parse the already-authenticated V1 payload.
-    // ------------------------------------------------------------
-
-    let mut channel_id = [0u8; 32];
-    channel_id.copy_from_slice(&input.payload[2..34]);
+    // Parse the already-authenticated V1 payload.
+    let mut voucher_channel_id = [0u8; 32];
+    voucher_channel_id.copy_from_slice(&payload[2..34]);
 
     let cumulative_amount = u64::from_le_bytes(
-        input.payload[34..42]
+        payload[34..42]
             .try_into()
             .expect("invalid cumulative amount slice"),
     );
 
     let expires_at = i64::from_le_bytes(
-        input.payload[42..50]
+        payload[42..50]
             .try_into()
             .expect("invalid expiry slice"),
     );
 
-    // ------------------------------------------------------------
-    // 4. Commit only the public result.
-    // ------------------------------------------------------------
+    // Match ordinary payment-channels `verify_voucher` semantics.
+    assert_eq!(
+        voucher_channel_id,
+        channel.channel_address,
+        "voucher channel_id does not match channel"
+    );
 
-    let journal = V1VoucherJournal {
-        channel_id,
-        cumulative_amount,
-        expires_at,
+    assert!(
+        expires_at == 0 || now_unix < expires_at,
+        "voucher expired"
+    );
+
+    assert!(
+        cumulative_amount <= channel.deposit,
+        "voucher cumulative_amount exceeds channel deposit"
+    );
+
+    assert!(
+        channel.settled < cumulative_amount,
+        "voucher watermark not strictly monotonic"
+    );
+
+    SettlementTransition {
+        channel_address: channel.channel_address,
+        previous_settled: channel.settled,
+        new_settled: cumulative_amount,
+    }
+}
+
+fn main() {
+    let input =
+        SettlementBatchInput::deserialize_reader(&mut env::stdin())
+            .expect("invalid settlement batch input encoding");
+
+    // First PR #2 checkpoint: prove exact ordinary-settle semantics for
+    // one independently authorized channel before enabling batching.
+    assert_eq!(
+        input.settlements.len(),
+        1,
+        "single-settlement prototype requires exactly one settlement"
+    );
+
+    let transition =
+        validate_settlement(&input.settlements[0], input.now_unix);
+
+    let journal = SettlementBatchJournal {
+        now_unix: input.now_unix,
+        transitions: vec![transition],
     };
 
     journal
         .serialize(&mut env::journal())
-        .expect("failed to serialize V1 voucher journal");
+        .expect("failed to serialize settlement batch journal");
 }
