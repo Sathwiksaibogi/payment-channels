@@ -113,21 +113,19 @@ fn payload_cumulative_amount(payload: &[u8]) -> u64 {
 }
 
 fn expected_journal(input: &SettlementBatchInput) -> SettlementBatchJournal {
-    assert_eq!(
-        input.settlements.len(),
-        1,
-        "expected-journal helper requires one settlement"
-    );
-
-    let settlement = &input.settlements[0];
-
-    SettlementBatchJournal {
-        now_unix: input.now_unix,
-        transitions: vec![SettlementTransition {
+    let transitions = input
+        .settlements
+        .iter()
+        .map(|settlement| SettlementTransition {
             channel_address: settlement.channel.channel_address,
             previous_settled: settlement.channel.settled,
             new_settled: payload_cumulative_amount(&settlement.payload),
-        }],
+        })
+        .collect();
+
+    SettlementBatchJournal {
+        now_unix: input.now_unix,
+        transitions,
     }
 }
 
@@ -187,6 +185,40 @@ mod tests {
 
     fn settlement_mut(input: &mut SettlementBatchInput) -> &mut SettlementInput {
         &mut input.settlements[0]
+    }
+
+    fn signed_settlement(
+        channel_address: [u8; 32],
+        signing_seed: [u8; 32],
+        cumulative_amount: u64,
+        expires_at: i64,
+        deposit: u64,
+        settled: u64,
+    ) -> SettlementInput {
+        let signing_key = SigningKey::from_bytes(&signing_seed);
+
+        let mut payload = Vec::with_capacity(V1_PAYLOAD_LEN);
+
+        payload.extend_from_slice(&zkchannel_zk_shared::V1_MAGIC);
+        payload.extend_from_slice(&channel_address);
+        payload.extend_from_slice(&cumulative_amount.to_le_bytes());
+        payload.extend_from_slice(&expires_at.to_le_bytes());
+
+        assert_eq!(payload.len(), V1_PAYLOAD_LEN);
+
+        let signature = signing_key.sign(&payload).to_bytes();
+
+        SettlementInput {
+            channel: ChannelStateInput {
+                channel_address,
+                status: CHANNEL_STATUS_OPEN,
+                deposit,
+                settled,
+                authorized_signer: signing_key.verifying_key().to_bytes(),
+            },
+            payload,
+            signature,
+        }
     }
 
     fn resign_payload(input: &mut SettlementBatchInput) {
@@ -418,5 +450,93 @@ mod tests {
             prove_and_decode(&input).is_none(),
             "mutated signed payload was accepted"
         );
+    }
+
+    #[test]
+    fn rejects_duplicate_channel_in_batch() {
+        let channel_address = [21u8; 32];
+        let signing_seed = [21u8; 32];
+
+        let input = SettlementBatchInput {
+            now_unix: TEST_NOW_UNIX,
+            settlements: vec![
+                signed_settlement(channel_address, signing_seed, 100, 0, 1_000, 20),
+                signed_settlement(channel_address, signing_seed, 200, 0, 1_000, 20),
+            ],
+        };
+
+        assert!(
+            prove_and_decode(&input).is_none(),
+            "duplicate channel was accepted"
+        );
+    }
+
+    #[test]
+    fn rejects_batch_if_any_settlement_is_invalid() {
+        let valid = signed_settlement([30u8; 32], [30u8; 32], 100, 0, 1_000, 10);
+
+        let mut invalid = signed_settlement([31u8; 32], [31u8; 32], 200, 0, 1_000, 20);
+
+        invalid.channel.deposit = 199;
+
+        let input = SettlementBatchInput {
+            now_unix: TEST_NOW_UNIX,
+            settlements: vec![valid, invalid],
+        };
+
+        assert!(
+            prove_and_decode(&input).is_none(),
+            "batch with invalid settlement was accepted"
+        );
+    }
+
+    #[test]
+    fn rejects_empty_batch() {
+        let input = SettlementBatchInput {
+            now_unix: TEST_NOW_UNIX,
+            settlements: vec![],
+        };
+
+        assert!(
+            prove_and_decode(&input).is_none(),
+            "empty settlement batch was accepted"
+        );
+    }
+
+    #[test]
+    fn accepts_multiple_independent_signers() {
+        let input = SettlementBatchInput {
+            now_unix: TEST_NOW_UNIX,
+            settlements: vec![
+                signed_settlement([10u8; 32], [10u8; 32], 100, 0, 1_000, 40),
+                signed_settlement([11u8; 32], [11u8; 32], 200, 0, 1_000, 75),
+                signed_settlement([12u8; 32], [12u8; 32], 300, 0, 1_000, 125),
+            ],
+        };
+
+        assert_ne!(
+            input.settlements[0].channel.authorized_signer,
+            input.settlements[1].channel.authorized_signer,
+        );
+
+        assert_ne!(
+            input.settlements[1].channel.authorized_signer,
+            input.settlements[2].channel.authorized_signer,
+        );
+
+        let journal = prove_and_decode(&input).expect("independent-signer batch was rejected");
+
+        assert_eq!(journal, expected_journal(&input));
+
+        assert_eq!(journal.transitions.len(), 3);
+
+        assert_eq!(journal.transitions[0].previous_settled, 40);
+        assert_eq!(journal.transitions[0].new_settled, 100);
+
+        assert_eq!(journal.transitions[1].previous_settled, 75);
+        assert_eq!(journal.transitions[1].new_settled, 200);
+
+        assert_eq!(journal.transitions[2].previous_settled, 125);
+        assert_eq!(journal.transitions[2].new_settled, 300);
     }
 }

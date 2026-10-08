@@ -103,20 +103,40 @@ fn main() {
         SettlementBatchInput::deserialize_reader(&mut env::stdin())
             .expect("invalid settlement batch input encoding");
 
-    // First PR #2 checkpoint: prove exact ordinary-settle semantics for
-    // one independently authorized channel before enabling batching.
-    assert_eq!(
-        input.settlements.len(),
-        1,
-        "single-settlement prototype requires exactly one settlement"
+    assert!(
+        !input.settlements.is_empty(),
+        "settlement batch must not be empty"
     );
 
-    let transition =
-        validate_settlement(&input.settlements[0], input.now_unix);
+    // A logical channel may advance at most once per batch.
+    //
+    // This intentionally uses an O(n^2) comparison for the prototype:
+    // it is deterministic, dependency-free, and easy to audit.
+    for i in 0..input.settlements.len() {
+        for j in 0..i {
+            assert_ne!(
+                input.settlements[i].channel.channel_address,
+                input.settlements[j].channel.channel_address,
+                "duplicate channel in settlement batch"
+            );
+        }
+    }
+
+    let mut transitions =
+        Vec::with_capacity(input.settlements.len());
+
+    for settlement in &input.settlements {
+        transitions.push(
+            validate_settlement(
+                settlement,
+                input.now_unix,
+            ),
+        );
+    }
 
     let journal = SettlementBatchJournal {
         now_unix: input.now_unix,
-        transitions: vec![transition],
+        transitions,
     };
 
     journal
