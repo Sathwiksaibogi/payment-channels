@@ -5,25 +5,18 @@ use ed25519_dalek::{Signature, VerifyingKey};
 use risc0_zkvm::guest::env;
 
 use zkchannel_zk_shared::{
-    SettlementBatchInput, SettlementBatchJournal, SettlementInput,
-    SettlementTransition, CHANNEL_STATUS_OPEN, V1_MAGIC, V1_PAYLOAD_LEN,settlement_batch_commitment,
+    settlement_batch_commitment, SettlementBatchInput, SettlementBatchJournal, SettlementInput,
+    SettlementTransition, CHANNEL_STATUS_OPEN, V1_MAGIC, V1_PAYLOAD_LEN,
 };
 
 risc0_zkvm::guest::entry!(main);
 
-fn validate_settlement(
-    settlement: &SettlementInput,
-    now_unix: i64,
-) -> SettlementTransition {
+fn validate_settlement(settlement: &SettlementInput, now_unix: i64) -> SettlementTransition {
     let channel = &settlement.channel;
     let payload = &settlement.payload;
 
     // Ordinary `settle` is valid only while the channel is OPEN.
-    assert_eq!(
-        channel.status,
-        CHANNEL_STATUS_OPEN,
-        "channel must be OPEN"
-    );
+    assert_eq!(channel.status, CHANNEL_STATUS_OPEN, "channel must be OPEN");
 
     // Preserve the exact existing V1 signed-message contract.
     assert_eq!(
@@ -32,20 +25,15 @@ fn validate_settlement(
         "V1 voucher payload must be exactly 50 bytes"
     );
 
-    assert_eq!(
-        &payload[0..2],
-        &V1_MAGIC,
-        "invalid V1 voucher magic"
-    );
+    assert_eq!(&payload[0..2], &V1_MAGIC, "invalid V1 voucher magic");
 
     // In the existing program the Ed25519 precompile has already verified
     // the signed message before verify_voucher() evaluates channel semantics.
     //
     // Here the zkVM performs that authorization directly using the signer
     // committed in the supplied channel state.
-    let verifying_key =
-        VerifyingKey::from_bytes(&channel.authorized_signer)
-            .expect("invalid channel authorized_signer");
+    let verifying_key = VerifyingKey::from_bytes(&channel.authorized_signer)
+        .expect("invalid channel authorized_signer");
 
     let signature = Signature::from_bytes(&settlement.signature);
 
@@ -63,23 +51,15 @@ fn validate_settlement(
             .expect("invalid cumulative amount slice"),
     );
 
-    let expires_at = i64::from_le_bytes(
-        payload[42..50]
-            .try_into()
-            .expect("invalid expiry slice"),
-    );
+    let expires_at = i64::from_le_bytes(payload[42..50].try_into().expect("invalid expiry slice"));
 
     // Match ordinary payment-channels `verify_voucher` semantics.
     assert_eq!(
-        voucher_channel_id,
-        channel.channel_address,
+        voucher_channel_id, channel.channel_address,
         "voucher channel_id does not match channel"
     );
 
-    assert!(
-        expires_at == 0 || now_unix < expires_at,
-        "voucher expired"
-    );
+    assert!(expires_at == 0 || now_unix < expires_at, "voucher expired");
 
     assert!(
         cumulative_amount <= channel.deposit,
@@ -99,9 +79,8 @@ fn validate_settlement(
 }
 
 fn main() {
-    let input =
-        SettlementBatchInput::deserialize_reader(&mut env::stdin())
-            .expect("invalid settlement batch input encoding");
+    let input = SettlementBatchInput::deserialize_reader(&mut env::stdin())
+        .expect("invalid settlement batch input encoding");
 
     assert!(
         !input.settlements.is_empty(),
@@ -122,27 +101,15 @@ fn main() {
         }
     }
 
-    let mut transitions =
-        Vec::with_capacity(input.settlements.len());
+    let mut transitions = Vec::with_capacity(input.settlements.len());
 
     for settlement in &input.settlements {
-        transitions.push(
-            validate_settlement(
-                settlement,
-                input.now_unix,
-            ),
-        );
+        transitions.push(validate_settlement(settlement, input.now_unix));
     }
 
-    let settlement_count =
-        u32::try_from(transitions.len())
-            .expect("settlement count exceeds u32");
+    let settlement_count = u32::try_from(transitions.len()).expect("settlement count exceeds u32");
 
-    let transitions_commitment =
-        settlement_batch_commitment(
-            input.now_unix,
-            &transitions,
-        );
+    let transitions_commitment = settlement_batch_commitment(input.now_unix, &transitions);
 
     let journal = SettlementBatchJournal {
         now_unix: input.now_unix,

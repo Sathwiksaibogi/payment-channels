@@ -157,7 +157,7 @@ fn main() {
     let fixture = load_fixture();
     let input = fixture_input(&fixture);
 
-    println!("Proving ZKChannel single-channel settlement semantics...");
+    println!("Proving ZKChannel independent V1 settlement batch...");
 
     let journal = prove_and_decode(&input).expect("canonical V1 settlement was rejected");
 
